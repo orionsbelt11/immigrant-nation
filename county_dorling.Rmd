@@ -1,0 +1,487 @@
+---
+title: "Immigrants by county"
+author: "Orion Wilcox"
+date: "2024-03-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tigris)
+library(tidycensus)
+library(sf)
+library(cartogram)
+library(magrittr)
+library(data.table)
+
+options(scipen = 999)
+```
+
+data
+
+```{r}
+proj = "C:/Users/Orion Wilcox/Documents/Personal/Blog/Projects/District Diversity/"
+
+
+#Identify ACS variables for total population and foreign born population
+acs_vars = load_variables(2022, "acs5", cache = T)
+
+pop_vars = c(population = "B01003_001")
+
+origin_vars = acs_vars %>%
+  filter(grepl("B05006_", name))
+origin_vars = origin_vars$name
+
+
+#Pull and combine total population and foreign born population by couny
+pop_data = get_acs(geography = "county",
+              variables = pop_vars,
+              year = 2022,
+              cache_table = T,
+              geometry = T,
+              cb = T) %>%
+  shift_geometry()
+
+origin_data = get_acs(geography = "county",
+              variables = origin_vars,
+              year = 2022,
+              cache_table = T)
+
+origin_data = left_join(origin_data, acs_vars, by = c("variable" = "name"))
+
+
+
+origin_data = origin_data %>%
+  separate(label, into = c("est", "tot", "region", "sub-region", "micro-region", "country"), sep = "!!") %>%
+  mutate(country = ifelse(is.na(country), `micro-region`, country))  %>%
+  select(-c(est, tot, `micro-region`))
+
+#total foreign born
+
+total_foreign_born = origin_data %>% filter(variable == "B05006_001")
+total_foreign_born$origin = "foreign_born"
+total_foreign_born = select(total_foreign_born, NAME, origin, estimate)
+
+#regions
+
+region_origin_data = origin_data %>% filter(is.na(`sub-region`), 
+                                            !is.na(region))
+region_origin_data$region = gsub(":", "", region_origin_data$region)
+
+region_origin_data = select(region_origin_data, NAME, origin = region, estimate)
+
+#sub-regions
+
+sub_region_origin_data = origin_data %>% filter(is.na(country),
+                                                !is.na(`sub-region`))
+sub_region_origin_data$`sub-region` = gsub(":", "", sub_region_origin_data$`sub-region`)
+
+sub_region_origin_data = select(sub_region_origin_data, NAME, origin = `sub-region`, estimate)
+
+#countries
+
+country_origin_data = origin_data %>% filter(!is.na(country))
+
+country_origin_data = select(country_origin_data, NAME, origin = country, estimate)
+
+origin_data = rbind(region_origin_data, sub_region_origin_data, country_origin_data)
+
+origin_names = origin_data$origin
+
+origin_data = rbind(origin_data, total_foreign_born)
+
+origin_data = origin_data %>%
+  dcast(NAME ~ origin, value.var = "estimate") %>%
+  left_join(pop_data, by = "NAME") %>% 
+  mutate(across(all_of(origin_data$origin), ~ . / estimate, .names = "{.col}_total_prp")) %>% 
+  mutate(across(all_of(origin_names), ~ . / foreign_born, .names = "{.col}_foreign_prp")) %>%
+  separate(NAME, into = c("county", "state"), sep = ",") %>%
+  mutate_at(vars(county, state), ~ str_trim(.)) %>%
+  select(county, state, origin_names, paste0(origin_names, "_total_prp"), paste0(origin_names, "_foreign_prp"), foreign_born, foreign_born_total_prp, population = estimate, geometry) %>%
+  filter(state != "Puerto Rico") %>%
+  st_as_sf() %>%
+  #using a projected CRS (NAD83 UTM Zone 16N)
+  st_transform(crs = 2163)
+
+#states for mapping
+
+states = states(cb = T) %>%
+  filter(GEOID <= 56) %>%
+  shift_geometry()
+
+```
+
+```{r}
+proj = "C:/Users/Orion Wilcox/Documents/Personal/Blog/Projects/District Diversity/"
+
+
+#Identify ACS variables for total population and foreign born population
+acs_vars = load_variables(2022, "acs5", cache = T)
+
+pop_vars = c(population = "B01003_001")
+
+origin_vars = c(
+         americas = "B05006_138",
+         eu = "B05006_002",
+         africa = "B05006_095",
+         asia = "B05006_047",
+         oceania = "B05006_130",
+         foreign_born = "B05006_001",
+         western_asia = "B05006_079",
+         iraq = "B05006_083",
+         ethiopia = "B05006_098",
+         somalia = "B05006_100",
+         kenya = "B05006_099",
+         egypt = "B05006_112")
+
+#latam regions
+carib = "B05006_140"
+central_america = "B05006_154"
+south_america = "B05006_164"
+
+#africa regions
+
+
+
+#Pull and combine total population and foreign born population by county
+
+pop_data = get_acs(geography = "county",
+              variables = pop_vars,
+              year = 2022,
+              cache_table = T,
+              geometry = T,
+              cb = T) %>%
+  shift_geometry()
+
+origin_data = get_acs(geography = "county",
+              variables = origin_vars,
+              year = 2022,
+              cache_table = T)
+
+
+county_data = origin_data %>%
+  dcast(NAME ~ variable, value.var = "estimate") %>%
+  left_join(pop_data, by = "NAME") %>%
+  mutate(across(all_of(names(origin_vars)), ~ . / estimate, .names = "{.col}_prp")) %>%
+  separate(NAME, into = c("county", "state"), sep = ",") %>%
+  mutate_at(vars(county, state), ~ str_trim(.)) %>%
+  select(county, state, names(origin_vars), paste0(names(origin_vars), "_prp"), population = estimate, geometry) %>%
+  filter(state != "Puerto Rico") %>%
+  st_as_sf() %>%
+  #using a projected CRS (NAD83 UTM Zone 16N)
+  st_transform(crs = 2163)
+
+#states for mapping
+
+states = states(cb = T) %>%
+  filter(GEOID <= 56) %>%
+  shift_geometry()
+
+```
+
+analysis
+```{r}
+
+#what percent of immigrants are from each major region?
+
+country_data = get_acs(geography = "us",
+              variables = origin_vars,
+              year = 2022,
+              cache_table = T)
+
+country_data = left_join(country_data, acs_vars, by = c("variable" = "name"))
+
+total_foreign_born = 45280680
+
+total_pop = sum(pop_data$estimate)
+
+country_data %<>%
+  mutate(pct_of_total_foreign_born = estimate/ total_foreign_born,
+         pct_of_total_pop = estimate/total_pop)
+
+```
+
+
+map cartogram
+
+key messages
+- Up to half the population is an immigrant in some counties
+
+```{r}
+
+#set up theme
+
+custom_theme = theme_void() +
+  theme(plot.title.position = "plot",
+        plot.title = element_text(family = "Space Grotesk",
+                                  face = "bold",
+                                  size = 25, margin = margin(t = 10, b = 15),
+                                  hjust = .5),
+        plot.subtitle = element_text(family = "Source Sans 3",
+                                     size = 16,
+                                     margin = margin(b = 5),
+                                     hjust = .5),
+        plot.caption = element_text(family = "Source Sans 3", 
+                                    size = 12),
+        plot.background = element_rect(fill = "#FDFCFB",
+                                       color = NA),
+        legend.position = "top",
+        legend.title = element_blank(),
+        legend.text = element_text(family = "Source Sans 3",
+                                   size = 12))
+
+#colors
+
+blues = c('#cffdf9', '#87b6ff', '#466cff')
+
+blue_accent = '#ff8d46'
+
+reds = c('#fefb98', '#ffac64', '#ff3f30')
+
+red_accent = "#3F30FF"
+
+purples = c('#a6aaff', '#d07dff', '#f030ff')
+
+purple_accent = '#FFF030'
+
+```
+
+
+map total population and foreign born population
+```{r}
+#create population cartogram for inset map
+
+carto_pop = county_data %>%
+  filter(foreign_born > 0) %>% cartogram_dorling(weight = "population",
+                          k = .6,
+                          itermax = 100)
+carto_pop = ggplot() +
+  geom_sf(data = carto_pop) +
+  theme_void()
+
+#create dorling cartograms
+
+#foreign born
+
+carto = origin_data %>%
+  filter(foreign_born > 0) %>% cartogram_dorling(weight = "foreign_born",
+                          k = 1,
+                          itermax = 100)
+
+no_forn = origin_data %>%
+  filter(foreign_born == 0) %>%
+  st_centroid()
+
+#On average 4 percent of the population is foreign born by county. But since we want to highlight the counties on the higher side of the spectrum, I'm only using 3 equal width breaks (0-20, 21-40,41-60)
+
+carto %<>%
+  mutate(pct_foreign_brks = cut(foreign_born_total_prp, breaks = c(0, .2, .4, .6)))
+  
+carto_foreign = ggplot() +
+  geom_sf(data = states, fill = NA, color = "grey70") +
+  geom_sf(data = no_forn, color = "black", fill = "white", shape = 23) +
+  geom_sf(data = carto, aes(fill = pct_foreign_brks)) +
+  scale_fill_manual(values = blues) +
+  theme_void() +
+  theme(legend.position = "none")
+
+carto_foreign
+ggsave(paste0(proj, "/visuals/counties/county_foreign.svg"), width = 1200, height = 961, device = svg, units = "px")
+
+```
+
+
+regional populations
+```{r}
+#create dorling cartograms
+
+#americas (50% of all foreign born)
+
+carto_americas = origin_data %>%
+  filter(Americas > 0) %>% cartogram_dorling(weight = "Americas",
+                          k = .5,
+                          itermax = 100)
+
+carto_americas %>% select(state, county, Americas) %>%
+  mapview::mapview()
+
+carto_americas %<>%
+  mutate(americas_prp_brks = cut(americas_prp, breaks = c(0, .2, .4, .6)))
+  
+carto_americas_map = ggplot() +
+  geom_sf(data = states, fill = NA, color = "grey70") +
+  geom_sf(data = carto_americas, aes(fill = americas_prp_brks)) +
+  scale_fill_manual(values = reds) +
+  theme_void()
+
+carto_americas_map
+
+
+#asia (30% of all foreign born)
+
+carto_asia = county_data %>%
+  filter(asia > 0) %>% cartogram_dorling(weight = "asia",
+                          k = .3,
+                          itermax = 100)
+
+
+carto_asia %<>%
+  mutate(asia_prp_brks = cut(asia_prp, breaks = c(0, .2, .3, .4)))
+  
+carto_asia_map = ggplot() +
+  geom_sf(data = states) +
+  geom_sf(data = carto_asia, aes(fill = asia_prp_brks)) +
+  scale_fill_manual(values = blues) +
+  theme_void()
+
+carto_asia_map
+
+#europe (10% of all foreign born)
+
+carto_eu = county_data %>%
+  filter(eu > 0) %>% cartogram_dorling(weight = "eu",
+                          k = .1,
+                          itermax = 100)
+
+
+carto_eu %<>%
+  mutate(eu_prp_brks = cut(eu_prp, breaks = c(0, .02, .04, .1)))
+  
+carto_eu_map = ggplot() +
+  geom_sf(data = states) +
+  geom_sf(data = carto_eu, aes(fill = eu_prp_brks)) +
+  scale_fill_manual(values = blues) +
+  theme_void()
+
+carto_eu_map
+
+
+ #africa
+
+carto_africa = county_data %>%
+  filter(africa > 0) %>% cartogram_dorling(weight = "africa",
+                          k = .05,
+                          itermax = 100)
+
+#On average 4 percent of the population is foreign born by county. But since we want to highlight the counties on the higher side of the spectrum, I'm only using 3 equal width breaks
+carto_africa %<>%
+  mutate(africa_prp_brks = cut(africa_prp, breaks = c(0, .03, .06, .09)))
+  
+carto_africa_map = ggplot() +
+  geom_sf(data = states) +
+  geom_sf(data = carto_africa, aes(fill = africa_prp_brks)) +
+  scale_fill_manual(values = purples) +
+  guides(fill = guide_colorsteps()) +
+  custom_theme
+  
+carto_africa_map
+
+#oceania
+
+carto_oceania = county_data %>%
+  filter(oceania > 0) %>% cartogram_dorling(weight = "oceania",
+                          k = .01,
+                          itermax = 100)
+
+#On average 4 percent of the population is foreign born by county. But since we want to highlight the counties on the higher side of the spectrum, I'm only using 3 equal width breaks
+carto_oceania %<>%
+  mutate(oceania_prp_brks = cut(oceania_prp, breaks = c(0, .003, .006, .03)))
+  
+carto_oceania_map = ggplot() +
+  geom_sf(data = states) +
+  geom_sf(data = carto_oceania, aes(fill = oceania_prp_brks)) +
+  scale_fill_manual(values = purples) +
+  guides(fill = guide_colorsteps()) +
+  custom_theme
+  
+carto_oceania_map
+
+#middle east
+
+carto_mena = origin_data %>%
+  mutate(mena = Iraq + Israel + Jordan +  Kuwait + Lebanon + `Saudi Arabia` +  Syria + Turkey + `United Arab Emirates` + Yemen + Iran +`Other Western Asia`,
+         mena_prp = mena / population,
+         mena_foreign_prp = mena / foreign_born) %>%
+  select(state, county, mena, mena_prp, mena_foreign_prp, Iraq, Israel, Jordan, Kuwait, Lebanon, `Saudi Arabia`, Syria, Turkey, `United Arab Emirates`, Yemen, Iran, `Other Western Asia`) %>%
+  filter(mena > 0) %>% cartogram_dorling(weight = "mena",
+                          k = .05,
+                          itermax = 100)
+
+#On average 4 percent of the population is foreign born by county. But since we want to highlight the counties on the higher side of the spectrum, I'm only using 3 equal width breaks
+carto_mena %<>%
+  mutate(mena_prp_brks = cut(mena_prp, breaks = c(0, .01, .02, .04)))
+  
+carto_mena_map = ggplot() +
+  geom_sf(data = states) +
+  geom_sf(data = carto_mena, aes(fill = mena_prp_brks)) +
+  scale_fill_manual(values = reds) +
+  guides(fill = guide_colorsteps()) +
+  custom_theme
+  
+carto_mena_map
+
+#china
+
+carto_china = origin_data %>%
+  filter(`China:` > 0) %>% cartogram_dorling(weight = "China:",
+                          k = .1,
+                          itermax = 100)
+
+#On average 4 percent of the population is foreign born by county. But since we want to highlight the counties on the higher side of the spectrum, I'm only using 3 equal width breaks
+carto_china %<>%
+  mutate(china_prp_brks = cut(`China:_total_prp`, breaks = c(0, .03, .06, .13)))
+  
+carto_china_map = ggplot() +
+  geom_sf(data = states) +
+  geom_sf(data = carto_china, aes(fill = china_prp_brks)) +
+  scale_fill_manual(values = reds) +
+  guides(fill = guide_colorsteps()) +
+  custom_theme
+  
+carto_china_map
+
+ggsave(paste0(proj, "/visuals/counties/county_china.svg"), width = 1200, height = 961, device = svg, units = "px")
+
+
+#maps
+
+carto_foreign
+carto_americas_map
+ggsave(paste0(proj, "/visuals/counties/county_americas.svg"), width = 1200, height = 961, device = svg, units = "px")
+carto_asia_map
+carto_eu_map
+ggsave(paste0(proj, "/visuals/counties/county_eu.svg"), width = 1200, height = 961, device = svg, units = "px")
+carto_africa_map
+ggsave(paste0(proj, "/visuals/counties/county_africa.svg"), width = 1200, height = 961, device = svg, units = "px")
+carto_oceania_map
+ggsave(paste0(proj, "/visuals/counties/county_oceania.svg"), width = 1200, height = 961, device = svg, units = "px")
+carto_mena_map
+ggsave(paste0(proj, "/visuals/counties/county_mena.svg"), width = 1200, height = 961, device = svg, units = "px")
+
+
+```
+
+
+
+#analysis
+
+```{r}
+
+```
+
+
+```{r}
+carto_foreign
+
+mapview::mapview(carto_africa)
+
+ggsave(paste0(proj, "/visuals/counties/county_foreign.svg"), width = 1200, height = 961, device = svg, units = "px")
+
+carto_pop
+
+ggsave(paste0(proj, "/visuals/counties/county_pop.svg"), width = 1200, height = 961, device = svg, units = "px")
+
+
+```
+
+
